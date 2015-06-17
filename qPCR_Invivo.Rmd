@@ -1,0 +1,127 @@
+**qPCR Analysis**
+
+```{r Chunk 1: read data and data munging }
+## provide file location
+setwd("/Users/shruti/Dropbox/SHRUTIM/Rscripts/qPCR/Final")
+## read the qPCR data
+pcrdata <- read.csv(file="./PCRdata.csv",stringsAsFactors=F) 
+## data munging (cleaning)
+condition_matrix <- data.frame(matrix(data=NA,nrow=nrow(pcrdata),ncol=2,dimnames=list(c(),c("InfectionStatus","Genotype"))))
+for(i in seq_len(nrow(pcrdata)))
+{
+  if(pcrdata$Condition[i]=="WT W/O HP")
+  {
+    condition_matrix[i,"InfectionStatus"] <- "- HP"
+    condition_matrix[i,"Genotype"] <- "WT"
+  }
+  else if(pcrdata$Condition[i]=="WT W/HP")
+  {
+    condition_matrix[i,"InfectionStatus"] <- "+ HP"
+    condition_matrix[i,"Genotype"] <- "WT"
+  }
+  else if(pcrdata$Condition[i]=="ShhKO W/O HP")
+  {
+    condition_matrix[i,"InfectionStatus"] <- "- HP"
+    condition_matrix[i,"Genotype"] <- "PC-SHH-KO"
+  }
+  else
+  {
+    condition_matrix[i,"InfectionStatus"] <- "+ HP"
+    condition_matrix[i,"Genotype"] <- "PC-SHH-KO"
+  }
+}
+pcrdata <- cbind(pcrdata,condition_matrix)
+```
+
+```{r Chunk 2: Calculation of delta Ct}
+## calculate average ct value for target
+Average.Ct.Target <- apply(pcrdata[c("Ct1","Ct2")],1,mean,na.rm=T)
+## calculate dCT = Ct.Target - Ct.calibrator gene
+dCT <- Average.Ct.Target - pcrdata[,"Ct.GAPDH"]
+pcrdata <- data.frame(cbind(pcrdata,Average.Ct.Target,dCT),stringsAsFactors=F)
+```
+
+```{r Chunk 3: Interaction Plots}
+## function for generating Interaction plot 
+Interaction <- function(dataset,gene,day){
+  ## subset based on gene and day
+  gene_data <- subset(dataset,Gene==gene & Day==day,)
+  ## run two-way anova
+  anova_result <- summary(aov(dCT~InfectionStatus*Genotype,data=gene_data))
+  Interaction_pvalue <- anova_result[[1]]["InfectionStatus:Genotype","Pr(>F)"]
+  Interaction_pvalue <- format(Interaction_pvalue,sceintific=T,digits=2)
+  interaction.plot(x.factor=gene_data$InfectionStatus,trace.factor=gene_data$Genotype,response=-gene_data$dCT,lty=c(1,2),col=c(2:3),lwd=c(2,2),xlab="",ylab=sprintf("%s  (-dCt)",gene),legend=F)
+  title(sprintf("%s Day %i",gene,day),line=1,cex.main=1)
+  mtext(sprintf("p-value: %s",Interaction_pvalue),side=1,line=2,cex=0.8)
+  return(Interaction_pvalue)
+}
+
+## generate interaction plot for all genes
+GeneNames <- unique(pcrdata$Gene)
+Days <- unique(pcrdata$Day)
+## set margin and number of rows and columns
+par(oma = c(4, 1, 1, 1),mar=c(3,4,4,2),xpd=T,mfrow=c(2,2))
+for(i in seq_along(GeneNames))
+{
+  for(j in seq_along(Days))
+  {
+    Interaction(pcrdata,GeneNames[i],Days[j])
+  }
+}
+## add legend at bottom
+par(fig = c(0, 1, 0, 1), oma = c(0, 0, 0, 0), mar = c(0, 0, 0, 0), new = TRUE)
+plot(0, 0, type = "n", bty = "n", xaxt = "n", yaxt = "n")
+legend("bottom", c("PC-SHH-KO","WT"), xpd = TRUE, horiz = TRUE, inset = c(1,0.02), bty = "n", lty=c(1,2),col=c(2:3),lwd=c(2,2),title="Genotype",seg.len=2,cex=1,y.intersp=1)
+```
+
+```{r Chunk 4: fold change and Bar graphs}
+## function to calculate ddCt
+DoubleDeltaCt <- function(dataset,gene,day,control,treatment)
+{
+  data <- subset(dataset,Gene==gene & Day==day & (Condition==control | Condition==treatment))
+  Average.Ct.Control <- mean(data[data$Condition==control,"dCT"],na.rm=T)
+  ddCT <- data[,"dCT"] - Average.Ct.Control
+  NormalizedToControl <- 2^(-ddCT)
+  data <- cbind(data,Average.Ct.Control,ddCT,NormalizedToControl) 
+  Average.Control <- mean(data[data$Condition==control,"NormalizedToControl"],na.rm=T)
+  Average.Treatment <- mean(data[data$Condition==treatment,"NormalizedToControl"],na.rm=T)
+  data <- cbind(data,Average.Control,Average.Treatment)
+  return(data)
+}
+
+############## bar graphs####################
+install.packages("sciplot")
+library("sciplot")
+## set margin and number of rows and columns
+par(oma = c(4, 1, 1, 1),mar=c(3,4,5,2),xpd=T,mfrow=c(2,2))
+
+for(i in seq_along(unique(pcrdata$Gene)))
+{
+  for(j in seq_along(unique(pcrdata$Day)))
+  {
+    WT <- DoubleDeltaCt(pcrdata,unique(pcrdata$Gene)[i],unique(pcrdata$Day)[j],"WT W/O HP","WT W/HP")
+    KO <- DoubleDeltaCt(pcrdata,unique(pcrdata$Gene)[i],unique(pcrdata$Day)[j],"ShhKO W/O HP","ShhKO W/HP")
+    combined <- rbind(WT,KO)
+    combined$Genotype <- factor(combined$Genotype,levels=c("WT","PC-SHH-KO"))
+    suppressWarnings(bargraph.CI(x.factor = Genotype, group=InfectionStatus, response = NormalizedToControl, data = combined,main=sprintf("Day %i",combined$Day[1]),cex.main=1,lc=F,cex.axis=0.8))
+    ## label y-axis
+    mtext("Average fold change in", side=2,line=3.5,cex=0.6)
+    mtext(sprintf("%s relative to uninfected",combined$Gene[1]),side=2,line=2.5,cex=0.6)
+    ### run bonferroni test
+    Bonf_test_WT <-  pairwise.t.test(WT$dCT,WT$Condition,p.adjust.method="bonf",pool.sd=F,paired=F)    
+    Bonf_WT_Pvalue <- as.numeric(format(Bonf_test_WT$p.value[1],scientific=T,digits=1))
+    Bonf_test_KO <-  pairwise.t.test(KO$dCT,KO$Condition,p.adjust.method="bonf",pool.sd=F,paired=F)    
+    Bonf_KO_Pvalue <- format(Bonf_test_KO$p.value[1],scientific=T,digits=1)
+    text(2,(max(WT$Average.Control,WT$Average.Treatment)+max(WT$Average.Control,WT$Average.Treatment)*0.2),labels=sprintf("pvalue= %s",Bonf_WT_Pvalue),cex=0.7)
+    text(5,(max(KO$Average.Control,KO$Average.Treatment)+max(KO$Average.Control,KO$Average.Treatment)*0.5),labels=sprintf("pvalue= %s",Bonf_KO_Pvalue),cex=0.7)
+  }
+}
+## add legend at bottom
+par(fig = c(0, 1, 0, 1), oma = c(0, 0, 0, 0), mar = c(0, 0, 0, 0), new = TRUE)
+plot(0, 0, type = "n", bty = "n", xaxt = "n", yaxt = "n")
+legend("bottom", c("-HP","+HP"),fill=c("black","grey"),xpd = TRUE, horiz = TRUE, inset = c(1,0.02), bty = "n",title="Genotype",seg.len=2,cex=1,y.intersp=1)
+
+
+```
+
+
